@@ -1,0 +1,79 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ==========================================
+    // Core Authorization Helpers
+    // ==========================================
+
+    // Helper: is the request authenticated with a valid email token?
+    function isAuthenticated() {
+      return request.auth != null && request.auth.token.email != null;
+    }
+
+    // Helper: is the user's email registered in the authorized_users allowlist collection?
+    function isAuthorizedUser() {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/authorized_users/$(request.auth.token.email.lower()));
+    }
+
+    // ==========================================
+    // 1. Authorized Users Collection (The Allowlist)
+    // ==========================================
+    // Any authenticated user can check their OWN allowlist status.
+    // Client-side writes are strictly forbidden (can only be written via Admin SDK or Cloud Functions).
+    match /authorized_users/{userEmail} {
+      allow read: if isAuthenticated() && request.auth.token.email.lower() == userEmail.lower();
+      allow write: if false;
+    }
+
+    // ==========================================
+    // 2. User Profiles Collection
+    // ==========================================
+    // Only authorized allowlist members can view profiles.
+    // A user may only create or edit their own profile document.
+    match /users/{userId} {
+      allow read: if isAuthorizedUser();
+      allow create, update: if isAuthorizedUser() && request.auth.uid == userId;
+      allow delete: if false;
+    }
+
+    // ==========================================
+    // 3. Conversations and Chat Messages
+    // ==========================================
+    // Restricted strictly to the two authorized users.
+    match /conversations/{conversationId} {
+      allow read, write: if isAuthorizedUser();
+
+      match /messages/{messageId} {
+        allow read, create: if isAuthorizedUser();
+        allow update, delete: if isAuthorizedUser() && resource.data.senderId == request.auth.uid;
+      }
+    }
+
+    // ==========================================
+    // 4. WebRTC Call Sessions and Signaling
+    // ==========================================
+    // Only authorized users can create, read, or update call invitations.
+    match /calls/{callId} {
+      allow read, create, update: if isAuthorizedUser();
+      allow delete: if isAuthorizedUser() && resource.data.callerId == request.auth.uid;
+
+      match /callerCandidates/{candidateId} {
+        allow read, write: if isAuthorizedUser();
+      }
+
+      match /receiverCandidates/{candidateId} {
+        allow read, write: if isAuthorizedUser();
+      }
+    }
+
+    // ==========================================
+    // 5. App Configuration (Read-only for authorized members)
+    // ==========================================
+    match /config/{document=**} {
+      allow read: if isAuthorizedUser();
+      allow write: if false;
+    }
+  }
+}
