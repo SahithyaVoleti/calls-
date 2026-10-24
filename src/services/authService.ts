@@ -5,10 +5,10 @@ import {
   sendPasswordResetEmail,
   sendEmailVerification,
   updateProfile as firebaseUpdateProfile,
-  type User,
 } from 'firebase/auth';
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
-import { auth, db } from './firebase';
+import { auth, db, isLiveFirebase } from './firebase';
+import { mockBackend } from './mockBackend';
 import { isEmailConfiguredAllowed, normalizeEmail } from '../utils/allowlist';
 import { type UserProfile } from '../types';
 
@@ -17,20 +17,20 @@ export class AuthService {
    * Check whether an authenticated user is on the Firestore allowlist
    */
   public async isUserAuthorizedInFirestore(email: string): Promise<boolean> {
+    if (!isLiveFirebase || !db) {
+      return isEmailConfiguredAllowed(email);
+    }
+
     try {
       const normalized = normalizeEmail(email);
-      // Query the authorized_users collection directly
       const docRef = doc(db, 'authorized_users', normalized);
       const snap = await getDoc(docRef);
       if (snap.exists()) {
         return true;
       }
-      // If Firestore allowlist doc does not exist yet (e.g. before initial seeding),
-      // we check if it matches the configured environment variables:
       return isEmailConfiguredAllowed(normalized);
     } catch (e) {
-      console.warn('[AuthService] Checking Firestore allowlist encountered error:', e);
-      // Fallback check against configured environment variable
+      console.warn('[AuthService] Firestore check fallback:', e);
       return isEmailConfiguredAllowed(email);
     }
   }
@@ -43,7 +43,7 @@ export class AuthService {
     password: string;
     displayName: string;
     photoURL?: string;
-  }): Promise<User> {
+  }): Promise<any> {
     const normalizedEmail = normalizeEmail(params.email);
 
     // Reject upfront if not in allowlist
@@ -51,6 +51,15 @@ export class AuthService {
       throw new Error(
         'This email address is not authorized to register on this private TogetherSpace instance.'
       );
+    }
+
+    if (!isLiveFirebase || !auth) {
+      // Local Demo Mode
+      return mockBackend.mockSignUp({
+        email: normalizedEmail,
+        displayName: params.displayName,
+        photoURL: params.photoURL,
+      });
     }
 
     const cred = await createUserWithEmailAndPassword(auth, normalizedEmail, params.password);
@@ -61,23 +70,23 @@ export class AuthService {
       photoURL: params.photoURL || '',
     });
 
-    // Write initial user profile in Firestore
-    const userRef = doc(db, 'users', user.uid);
-    await setDoc(
-      userRef,
-      {
-        uid: user.uid,
-        email: normalizedEmail,
-        displayName: params.displayName,
-        photoURL: params.photoURL || '',
-        isOnline: true,
-        lastSeen: serverTimestamp(),
-        createdAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
+    if (db) {
+      const userRef = doc(db, 'users', user.uid);
+      await setDoc(
+        userRef,
+        {
+          uid: user.uid,
+          email: normalizedEmail,
+          displayName: params.displayName,
+          photoURL: params.photoURL || '',
+          isOnline: true,
+          lastSeen: serverTimestamp(),
+          createdAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
 
-    // Send verification email
     try {
       await sendEmailVerification(user);
     } catch (err) {
@@ -90,33 +99,38 @@ export class AuthService {
   /**
    * Log in with email and password
    */
-  public async login(email: string, password: string): Promise<User> {
+  public async login(email: string, password: string): Promise<any> {
     const normalizedEmail = normalizeEmail(email);
 
-    // Verify allowlist upfront
     if (!isEmailConfiguredAllowed(normalizedEmail)) {
       throw new Error(
         'Access denied: This email address is not in the authorized two-user list for TogetherSpace.'
       );
     }
 
+    if (!isLiveFirebase || !auth) {
+      // Local Demo Mode
+      return mockBackend.mockLogin(normalizedEmail);
+    }
+
     const cred = await signInWithEmailAndPassword(auth, normalizedEmail, password);
     const user = cred.user;
 
-    // Ensure user record in Firestore is up to date
-    const userRef = doc(db, 'users', user.uid);
-    await setDoc(
-      userRef,
-      {
-        uid: user.uid,
-        email: normalizedEmail,
-        displayName: user.displayName || 'Authorized User',
-        photoURL: user.photoURL || '',
-        isOnline: true,
-        lastSeen: serverTimestamp(),
-      },
-      { merge: true }
-    );
+    if (db) {
+      const userRef = doc(db, 'users', user.uid);
+      await setDoc(
+        userRef,
+        {
+          uid: user.uid,
+          email: normalizedEmail,
+          displayName: user.displayName || 'Authorized User',
+          photoURL: user.photoURL || '',
+          isOnline: true,
+          lastSeen: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
 
     return user;
   }
@@ -125,8 +139,13 @@ export class AuthService {
    * Log out the current user
    */
   public async logout(): Promise<void> {
+    if (!isLiveFirebase || !auth) {
+      mockBackend.mockLogout();
+      return;
+    }
+
     const user = auth.currentUser;
-    if (user) {
+    if (user && db) {
       try {
         const userRef = doc(db, 'users', user.uid);
         await setDoc(
@@ -156,22 +175,35 @@ export class AuthService {
         'This email address is not authorized for this TogetherSpace instance.'
       );
     }
-    await sendPasswordResetEmail(auth, normalizedEmail);
+    if (isLiveFirebase && auth) {
+      await sendPasswordResetEmail(auth, normalizedEmail);
+    }
   }
 
   /**
    * Resend verification email
    */
   public async resendVerification(): Promise<void> {
-    const user = auth.currentUser;
-    if (!user) throw new Error('No authenticated user found');
-    await sendEmailVerification(user);
+    if (isLiveFirebase && auth?.currentUser) {
+      await sendEmailVerification(auth.currentUser);
+    }
   }
 
   /**
    * Update current user profile
    */
   public async updateUserProfile(params: { displayName: string; photoURL?: string }): Promise<void> {
+    if (!isLiveFirebase || !auth) {
+      const current = mockBackend.getCurrentSessionUser();
+      if (current) {
+        current.displayName = params.displayName;
+        if (params.photoURL !== undefined) current.photoURL = params.photoURL;
+        sessionStorage.setItem('togetherspace_mock_user', JSON.stringify(current));
+        mockBackend.saveUserProfile(current);
+      }
+      return;
+    }
+
     const user = auth.currentUser;
     if (!user) throw new Error('No authenticated user');
 
@@ -180,22 +212,38 @@ export class AuthService {
       photoURL: params.photoURL !== undefined ? params.photoURL : user.photoURL,
     });
 
-    const userRef = doc(db, 'users', user.uid);
-    await setDoc(
-      userRef,
-      {
-        displayName: params.displayName,
-        photoURL: params.photoURL !== undefined ? params.photoURL : user.photoURL,
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
+    if (db) {
+      const userRef = doc(db, 'users', user.uid);
+      await setDoc(
+        userRef,
+        {
+          displayName: params.displayName,
+          photoURL: params.photoURL !== undefined ? params.photoURL : user.photoURL,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
   }
 
   /**
    * Fetch current user profile document
    */
   public async getUserProfile(uid: string): Promise<UserProfile | null> {
+    if (!isLiveFirebase || !db) {
+      const user = mockBackend.getCurrentSessionUser();
+      if (user) {
+        return {
+          uid: user.uid,
+          email: user.email,
+          displayName: user.displayName,
+          photoURL: user.photoURL,
+          isOnline: true,
+        };
+      }
+      return null;
+    }
+
     try {
       const userRef = doc(db, 'users', uid);
       const snap = await getDoc(userRef);

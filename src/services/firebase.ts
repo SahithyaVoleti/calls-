@@ -11,31 +11,38 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID || '',
 };
 
-export const isFirebaseConfigured = Boolean(
+// Check if credentials are real Firebase credentials or default placeholder
+export const isLiveFirebase = Boolean(
   firebaseConfig.apiKey &&
-  firebaseConfig.authDomain &&
-  firebaseConfig.projectId
+  !firebaseConfig.apiKey.startsWith('mock-') &&
+  firebaseConfig.apiKey.length >= 20 &&
+  firebaseConfig.projectId &&
+  !firebaseConfig.projectId.includes('demo')
 );
 
-let app: FirebaseApp;
-if (!getApps().length) {
-  app = initializeApp(firebaseConfig);
-} else {
-  app = getApp();
-}
+let app: FirebaseApp | null = null;
+let authInstance: Auth | null = null;
+let dbInstance: Firestore | null = null;
 
-export const auth: Auth = getAuth(app);
-export const db: Firestore = getFirestore(app);
-
-// Support for local Firebase Emulators in testing or local dev
-if (import.meta.env.VITE_USE_FIREBASE_EMULATOR === 'true') {
+if (isLiveFirebase) {
   try {
-    connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
-    connectFirestoreEmulator(db, '127.0.0.1', 8080);
-    console.info('[Firebase] Connected to local Firebase emulators');
+    if (!getApps().length) {
+      app = initializeApp(firebaseConfig);
+    } else {
+      app = getApp();
+    }
+    authInstance = getAuth(app);
+    dbInstance = getFirestore(app);
+
+    if (import.meta.env.VITE_USE_FIREBASE_EMULATOR === 'true') {
+      connectAuthEmulator(authInstance, 'http://127.0.0.1:9099', { disableWarnings: true });
+      connectFirestoreEmulator(dbInstance, '127.0.0.1', 8080);
+    }
   } catch (err) {
-    console.warn('[Firebase] Emulator connection skipped or already initialized', err);
+    console.warn('[Firebase] Initialization skipped or using fallback mode:', err);
   }
 }
 
+export const auth = authInstance as Auth;
+export const db = dbInstance as Firestore;
 export default app;

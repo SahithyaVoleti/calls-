@@ -10,7 +10,8 @@ import {
   type Unsubscribe,
   setDoc,
 } from 'firebase/firestore';
-import { db } from './firebase';
+import { db, isLiveFirebase } from './firebase';
+import { mockBackend } from './mockBackend';
 import { type ChatMessage } from '../types';
 
 export const PRIMARY_CONVERSATION_ID = 'primary';
@@ -20,6 +21,8 @@ export class ChatService {
    * Ensure conversation container document exists
    */
   public async ensureConversationExists(): Promise<void> {
+    if (!isLiveFirebase || !db) return;
+
     try {
       const convRef = doc(db, 'conversations', PRIMARY_CONVERSATION_ID);
       await setDoc(
@@ -31,7 +34,7 @@ export class ChatService {
         { merge: true }
       );
     } catch (e) {
-      // Handled silently or caught during message send
+      // Handled silently
     }
   }
 
@@ -53,6 +56,19 @@ export class ChatService {
       throw new Error('Message exceeds maximum length of 2500 characters');
     }
 
+    if (!isLiveFirebase || !db) {
+      mockBackend.sendMockMessage({
+        conversationId: PRIMARY_CONVERSATION_ID,
+        senderId: params.senderId,
+        senderEmail: params.senderEmail.toLowerCase(),
+        senderName: params.senderName,
+        senderAvatar: params.senderAvatar || '',
+        text: trimmed,
+        status: 'sent',
+      });
+      return `mock_msg_${Date.now()}`;
+    }
+
     const messagesCol = collection(db, 'conversations', PRIMARY_CONVERSATION_ID, 'messages');
     const docRef = await addDoc(messagesCol, {
       conversationId: PRIMARY_CONVERSATION_ID,
@@ -65,7 +81,6 @@ export class ChatService {
       status: 'sent',
     });
 
-    // Update conversation metadata
     try {
       const convRef = doc(db, 'conversations', PRIMARY_CONVERSATION_ID);
       await setDoc(
@@ -92,6 +107,10 @@ export class ChatService {
     onMessages: (messages: ChatMessage[]) => void,
     maxMessages: number = 100
   ): Unsubscribe {
+    if (!isLiveFirebase || !db) {
+      return mockBackend.subscribeToMessages(onMessages);
+    }
+
     const messagesCol = collection(db, 'conversations', PRIMARY_CONVERSATION_ID, 'messages');
     const q = query(messagesCol, orderBy('timestamp', 'asc'), limit(maxMessages));
 

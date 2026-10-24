@@ -9,7 +9,8 @@ import {
   getDocs,
   type Unsubscribe,
 } from 'firebase/firestore';
-import { db } from './firebase';
+import { db, isLiveFirebase } from './firebase';
+import { mockBackend } from './mockBackend';
 import { type UserProfile } from '../types';
 
 export class PresenceService {
@@ -24,6 +25,14 @@ export class PresenceService {
     inCall: boolean = false,
     activeCallId: string | null = null
   ): Promise<void> {
+    if (!isLiveFirebase || !db) {
+      const user = mockBackend.getCurrentSessionUser();
+      if (user?.email) {
+        mockBackend.broadcastPresence(user.email, isOnline, inCall, activeCallId);
+      }
+      return;
+    }
+
     try {
       const userRef = doc(db, 'users', userId);
       await updateDoc(userRef, {
@@ -43,6 +52,14 @@ export class PresenceService {
   public startHeartbeat(userId: string): void {
     this.stopHeartbeat();
     this.heartbeatInterval = setInterval(async () => {
+      if (!isLiveFirebase || !db) {
+        const user = mockBackend.getCurrentSessionUser();
+        if (user?.email) {
+          mockBackend.broadcastPresence(user.email, true);
+        }
+        return;
+      }
+
       try {
         const userRef = doc(db, 'users', userId);
         await updateDoc(userRef, {
@@ -50,7 +67,7 @@ export class PresenceService {
           lastSeen: serverTimestamp(),
         });
       } catch (err) {
-        // Silently fail or ignore if network blipped
+        // Silently fail if network blipped
       }
     }, 45000);
   }
@@ -72,6 +89,10 @@ export class PresenceService {
     partnerEmail: string,
     onPartnerUpdate: (profile: UserProfile | null) => void
   ): Unsubscribe {
+    if (!isLiveFirebase || !db) {
+      return mockBackend.listenToPartner(partnerEmail, onPartnerUpdate);
+    }
+
     const normalized = partnerEmail.trim().toLowerCase();
     const usersCol = collection(db, 'users');
     const q = query(usersCol, where('email', '==', normalized));
@@ -106,6 +127,10 @@ export class PresenceService {
    * Find a user profile by email once
    */
   public async getProfileByEmail(email: string): Promise<UserProfile | null> {
+    if (!isLiveFirebase || !db) {
+      return mockBackend.getUserProfileByEmail(email);
+    }
+
     const normalized = email.trim().toLowerCase();
     const usersCol = collection(db, 'users');
     const q = query(usersCol, where('email', '==', normalized));

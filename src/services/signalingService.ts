@@ -11,12 +11,15 @@ import {
   addDoc,
   getDoc,
 } from 'firebase/firestore';
-import { db } from './firebase';
+import { db, isLiveFirebase } from './firebase';
+import { mockBackend } from './mockBackend';
 import { type CallSession, type CallType, type IceCandidatePayload } from '../types';
 
 export class SignalingService {
+  private activeMockCalls: Map<string, CallSession> = new Map();
+
   /**
-   * Create a new call session document in Firestore
+   * Create a new call session document
    */
   public async createCall(params: {
     callerId: string;
@@ -29,10 +32,10 @@ export class SignalingService {
     type: CallType;
     offer: { type: 'offer'; sdp: string };
   }): Promise<string> {
-    const callDocRef = doc(collection(db, 'calls'));
-    const callId = callDocRef.id;
+    const callId = `call_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
 
-    await setDoc(callDocRef, {
+    const session: CallSession = {
+      id: callId,
       callerId: params.callerId,
       callerEmail: params.callerEmail.toLowerCase(),
       callerName: params.callerName,
@@ -43,6 +46,19 @@ export class SignalingService {
       type: params.type,
       status: 'ringing',
       offer: params.offer,
+      createdAt: Date.now(),
+    };
+
+    if (!isLiveFirebase || !db) {
+      this.activeMockCalls.set(callId, session);
+      mockBackend.broadcastCall('new_call', session);
+      return callId;
+    }
+
+    const callDocRef = doc(db, 'calls', callId);
+    await setDoc(callDocRef, {
+      ...params,
+      status: 'ringing',
       createdAt: serverTimestamp(),
     });
 
@@ -57,6 +73,10 @@ export class SignalingService {
     onUpdate: (session: CallSession) => void,
     onError?: (err: any) => void
   ): Unsubscribe {
+    if (!isLiveFirebase || !db) {
+      return mockBackend.listenToCallDoc(callId, onUpdate);
+    }
+
     const callDocRef = doc(db, 'calls', callId);
     return onSnapshot(
       callDocRef,
@@ -83,6 +103,10 @@ export class SignalingService {
     userEmail: string,
     onIncomingCall: (call: CallSession) => void
   ): Unsubscribe {
+    if (!isLiveFirebase || !db) {
+      return mockBackend.listenForIncomingCalls(userEmail, onIncomingCall);
+    }
+
     const normalizedEmail = userEmail.trim().toLowerCase();
     const callsRef = collection(db, 'calls');
     const q = query(
@@ -97,7 +121,6 @@ export class SignalingService {
         snapshot.docChanges().forEach((change) => {
           if (change.type === 'added') {
             const data = change.doc.data();
-            // Stale check: only accept calls initiated in the last 75 seconds
             const now = Date.now();
             let isStale = false;
             if (data.createdAt?.toMillis) {
@@ -126,6 +149,15 @@ export class SignalingService {
    * Accept an incoming call by providing an answer SDP
    */
   public async answerCall(callId: string, answer: { type: 'answer'; sdp: string }): Promise<void> {
+    if (!isLiveFirebase || !db) {
+      const call = this.activeMockCalls.get(callId) || { id: callId } as CallSession;
+      call.answer = answer;
+      call.status = 'connected';
+      this.activeMockCalls.set(callId, call);
+      mockBackend.broadcastCall('call_update', call);
+      return;
+    }
+
     const callDocRef = doc(db, 'calls', callId);
     await updateDoc(callDocRef, {
       answer,
@@ -138,6 +170,14 @@ export class SignalingService {
    * Decline an incoming call
    */
   public async declineCall(callId: string, reason: 'declined' | 'busy' = 'declined'): Promise<void> {
+    if (!isLiveFirebase || !db) {
+      const call = this.activeMockCalls.get(callId) || { id: callId } as CallSession;
+      call.status = reason;
+      this.activeMockCalls.set(callId, call);
+      mockBackend.broadcastCall('call_update', call);
+      return;
+    }
+
     const callDocRef = doc(db, 'calls', callId);
     await updateDoc(callDocRef, {
       status: reason,
@@ -149,6 +189,14 @@ export class SignalingService {
    * Mark call as ended
    */
   public async endCall(callId: string): Promise<void> {
+    if (!isLiveFirebase || !db) {
+      const call = this.activeMockCalls.get(callId) || { id: callId } as CallSession;
+      call.status = 'ended';
+      this.activeMockCalls.set(callId, call);
+      mockBackend.broadcastCall('call_update', call);
+      return;
+    }
+
     try {
       const callDocRef = doc(db, 'calls', callId);
       const snapshot = await getDoc(callDocRef);
@@ -162,18 +210,23 @@ export class SignalingService {
         }
       }
     } catch (err) {
-      console.warn('[Signaling] endCall error (possibly already ended):', err);
+      console.warn('[Signaling] endCall error:', err);
     }
   }
 
   /**
-   * Push an ICE candidate to the call's candidate subcollection
+   * Push an ICE candidate to the call
    */
   public async sendIceCandidate(
     callId: string,
     role: 'caller' | 'receiver',
     candidate: RTCIceCandidate
   ): Promise<void> {
+    if (!isLiveFirebase || !db) {
+      mockBackend.broadcastCandidate(callId, role, candidate);
+      return;
+    }
+
     const subcollectionName = role === 'caller' ? 'callerCandidates' : 'receiverCandidates';
     const candidatesCol = collection(db, 'calls', callId, subcollectionName);
 
@@ -195,6 +248,10 @@ export class SignalingService {
     peerRole: 'caller' | 'receiver',
     onCandidate: (candidateInit: RTCIceCandidateInit) => void
   ): Unsubscribe {
+    if (!isLiveFirebase || !db) {
+      return mockBackend.listenToPeerCandidates(callId, peerRole, onCandidate);
+    }
+
     const subcollectionName = peerRole === 'caller' ? 'callerCandidates' : 'receiverCandidates';
     const candidatesCol = collection(db, 'calls', callId, subcollectionName);
 

@@ -1,17 +1,19 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
-import { auth } from '../services/firebase';
+import { auth, isLiveFirebase } from '../services/firebase';
 import { authService } from '../services/authService';
 import { presenceService } from '../services/presenceService';
+import { mockBackend } from '../services/mockBackend';
 import { getPartnerEmail, isEmailConfiguredAllowed } from '../utils/allowlist';
 import { type UserProfile } from '../types';
 
 interface AuthContextType {
-  currentUser: User | null;
+  currentUser: any;
   userProfile: UserProfile | null;
   loading: boolean;
   isAuthorized: boolean;
   partnerEmail: string | null;
+  isDemoMode: boolean;
   login: (email: string, pass: string) => Promise<User>;
   signUp: (params: { email: string; pass: string; displayName: string; photoURL?: string }) => Promise<User>;
   logout: () => Promise<void>;
@@ -24,12 +26,12 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [currentUser, setCurrentUser] = useState<any>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [isAuthorized, setIsAuthorized] = useState(false);
 
-  const fetchProfile = async (user: User) => {
+  const fetchProfile = async (user: any) => {
     try {
       const profile = await authService.getUserProfile(user.uid);
       if (profile) {
@@ -49,34 +51,65 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      setLoading(true);
-      if (user && user.email) {
-        const allowed = isEmailConfiguredAllowed(user.email);
-        setIsAuthorized(allowed);
-        setCurrentUser(user);
+    let unsubscribe: () => void;
 
-        if (allowed) {
-          await fetchProfile(user);
-          // Set user presence online and start heartbeat
-          presenceService.setOnlineStatus(user.uid, true);
-          presenceService.startHeartbeat(user.uid);
+    if (!isLiveFirebase || !auth) {
+      // Local Demo Mode: listen to mockBackend session updates
+      unsubscribe = mockBackend.onAuthStateChanged(async (user) => {
+        setLoading(true);
+        if (user && user.email) {
+          const allowed = isEmailConfiguredAllowed(user.email);
+          setIsAuthorized(allowed);
+          setCurrentUser(user);
+          if (allowed) {
+            setUserProfile({
+              uid: user.uid,
+              email: user.email,
+              displayName: user.displayName || 'Authorized Member',
+              photoURL: user.photoURL,
+              isOnline: true,
+            });
+            presenceService.setOnlineStatus(user.uid, true);
+          } else {
+            setUserProfile(null);
+          }
         } else {
+          setCurrentUser(null);
           setUserProfile(null);
+          setIsAuthorized(false);
         }
-      } else {
-        if (currentUser) {
-          presenceService.stopHeartbeat();
+        setLoading(false);
+      });
+    } else {
+      // Live Firebase Mode
+      unsubscribe = onAuthStateChanged(auth, async (user) => {
+        setLoading(true);
+        if (user && user.email) {
+          const allowed = isEmailConfiguredAllowed(user.email);
+          setIsAuthorized(allowed);
+          setCurrentUser(user);
+
+          if (allowed) {
+            await fetchProfile(user);
+            presenceService.setOnlineStatus(user.uid, true);
+            presenceService.startHeartbeat(user.uid);
+          } else {
+            setUserProfile(null);
+          }
+        } else {
+          if (currentUser) {
+            presenceService.stopHeartbeat();
+          }
+          setCurrentUser(null);
+          setUserProfile(null);
+          setIsAuthorized(false);
         }
-        setCurrentUser(null);
-        setUserProfile(null);
-        setIsAuthorized(false);
-      }
-      setLoading(false);
-    });
+        setLoading(false);
+      });
+    }
 
     return () => {
-      unsubscribe();
+      if (unsubscribe) unsubscribe();
       presenceService.stopHeartbeat();
     };
   }, []);
@@ -154,6 +187,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         loading,
         isAuthorized,
         partnerEmail,
+        isDemoMode: !isLiveFirebase,
         login,
         signUp,
         logout,
